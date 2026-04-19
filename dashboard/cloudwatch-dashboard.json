@@ -1,0 +1,119 @@
+{
+  "widgets": [
+    {
+      "type": "metric",
+      "properties": {
+        "title": "Lambda Invocations",
+        "annotations": { "horizontal": [] },
+        "liveData": true,
+        "metrics": [
+          ["AWS/Lambda", "Invocations", { "stat": "Sum", "label": "Trigger" }],
+          ["...", { "stat": "Sum", "label": "Process" }]
+        ],
+        "period": 60,
+        "stat": "Sum",
+        "region": "us-east-1",
+        "title": "Lambda Invocations per Minute",
+        "width": 12,
+        "height": 6
+      }
+    },
+    {
+      "type": "metric",
+      "properties": {
+        "title": "Lambda Errors",
+        "annotations": { "horizontal": [] },
+        "liveData": true,
+        "metrics": [
+          ["AWS/Lambda", "Errors", { "stat": "Sum", "label": "Trigger Errors" }],
+          ["...", { "stat": "Sum", "label": "Process Errors" }]
+        ],
+        "period": 60,
+        "stat": "Sum",
+        "region": "us-east-1",
+        "width": 6,
+        "height": 6
+      }
+    },
+    {
+      "type": "metric",
+      "properties": {
+        "title": "Lambda Duration (p95)",
+        "annotations": { "horizontal": [] },
+        "liveData": true,
+        "metrics": [
+          ["AWS/Lambda", "Duration", { "stat": "p95", "label": "Trigger p95" }],
+          ["...", { "stat": "p95", "label": "Process p95" }]
+        ],
+        "period": 60,
+        "stat": "p95",
+        "region": "us-east-1",
+        "width": 6,
+        "height": 6
+      }
+    },
+    {
+      "type": "metric",
+      "properties": {
+        "title": "SES Delivery Rate",
+        "annotations": { "horizontal": [] },
+        "liveData": true,
+        "metrics": [
+          ["AWS/SES", "Send", { "stat": "Sum", "label": "Sent" }],
+          ["AWS/SES", "Bounce", { "stat": "Sum", "label": "Bounced" }],
+          ["AWS/SES", "Complaint", { "stat": "Sum", "label": "Complaints" }]
+        ],
+        "period": 300,
+        "stat": "Sum",
+        "region": "us-east-1",
+        "width": 6,
+        "height": 6
+      }
+    },
+    {
+      "type": "metric",
+      "properties": {
+        "title": "S3 Object Count by Prefix",
+        "annotations": { "horizontal": [] },
+        "liveData": true,
+        "metrics": [
+          ["AWS/S3", "ObjectCount", "BucketName": "{{RawBucket}}", "StorageType": "RawVideos"],
+          ["AWS/S3", "ObjectCount", "BucketName": "{{ProcessedBucket}}", "StorageType": "Transcoded"]
+        ],
+        "period": 3600,
+        "stat": "Average",
+        "region": "us-east-1",
+        "width": 12,
+        "height": 6
+      }
+    },
+    {
+      "type": "log",
+      "properties": {
+        "title": "Trigger Lambda — Recent Errors",
+        "query": "fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 20",
+        "region": "us-east-1",
+        "width": 12,
+        "height": 6
+      }
+    },
+    {
+      "type": "log",
+      "properties": {
+        "title": "Process Lambda — Processing Timeline",
+        "query": "fields @timestamp, event | filter event like /process_complete|mediaconvert_labels|rekognition|sent/ | sort @timestamp desc | limit 30",
+        "region": "us-east-1",
+        "width": 12,
+        "height": 6
+      }
+    },
+    {
+      "type": "text",
+      "properties": {
+        "markdown": "## 📊 Media Intelligence Pipeline — Operations Dashboard\n\n**Update variables:** Replace `{{RawBucket}}` and `{{ProcessedBucket}}` with your actual bucket names, or import this dashboard and use the parameter substitution feature.\n\n**Quick links:**\n- [MediaConvert Jobs](https://console.aws.amazon.com/mediaconvert/home?region=us-east-1#jobs)\n- [S3 Buckets](https://console.aws.amazon.com/s3/home)\n- [Lambda Functions](https://console.aws.amazon.com/lambda/home?region=us-east-1)\n- [SES Account](https://console.aws.amazon.com/ses/home?region=us-east-1#)\n\n**Alarm threshold guide:**\n- Lambda errors > 0 for 1 min → Alert\n- SES bounce rate > 1% → Alert\n- Lambda duration p95 > 600s → Investigate",
+        "width": 12,
+        "height": 6
+      }
+    }
+  ]
+}

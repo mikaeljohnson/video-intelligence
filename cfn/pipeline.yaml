@@ -1,0 +1,648 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "AWS Media Intelligence Pipeline — Serverless Video/Audio Analysis at Scale"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: "media-intelligence"
+    Description: Prefix for all resource names
+    MaxLength: 20
+    AllowedPattern: "[a-z0-9-]+"
+
+  NotificationEmail:
+    Type: String
+    Description: Email address to send completion notifications to
+    AllowedPattern: "[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"
+
+  NotificationPhone:
+    Type: String
+    Default: ""
+    Description: Optional SMS phone number for SNS fallback (E.164 format, e.g. +12065551234)
+
+  EnableCelebrityRecognition:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Enable celebrity detection (adds Rekognition cost)
+
+  ModerationThreshold:
+    Type: Number
+    Default: 75
+    Description: Minimum confidence (0-100) for moderation flags to be included in report
+    MinValue: 0
+    MaxValue: 100
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731]
+    Description: CloudWatch log retention period
+
+  RawBucketLifecycleDays:
+    Type: Number
+    Default: 30
+    Description: Days before raw uploads transition to S3 Intelligent-Tiering
+
+  ProcessedBucketRetentionDays:
+    Type: Number
+    Default: 365
+    Description: Days before processed files are deleted
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: Configuration
+        Parameters: [ProjectName, NotificationEmail, NotificationPhone, EnableCelebrityRecognition, ModerationThreshold]
+      - Label: Data Lifecycle
+        Parameters: [LogRetentionDays, RawBucketLifecycleDays, ProcessedBucketRetentionDays]
+
+Resources:
+  # ─────────────────────────────────────────────────────────────────────────
+  # S3 Buckets
+  # ─────────────────────────────────────────────────────────────────────────
+  RawVideosBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-raw-videos-${AWS::AccountId}-${AWS::Region}"
+      VersioningStatus: Enabled
+      EncryptionConfiguration:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: RawVideosTiering
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: !Ref RawBucketLifecycleDays
+                StorageClass: INTELLIGENT_TIERING
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: production
+
+  ProcessedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-processed-${AWS::AccountId}-${AWS::Region}"
+      VersioningStatus: Enabled
+      EncryptionConfiguration:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ProcessedBucketExpiration
+            Status: Enabled
+            ExpirationInDays: !Ref ProcessedBucketRetentionDays
+          - Id: IntelligentTieringProcessed
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: INTELLIGENT_TIERING
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: production
+
+  # S3 bucket policy — allow MediaConvert service to write transcoded outputs
+  ProcessedBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ProcessedBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowMediaConvertReadRaw
+            Effect: Allow
+            Principal:
+              Service: mediaconvert.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${RawVideosBucket.Arn}/*"
+          - Sid: AllowMediaConvertWriteProcessed
+            Effect: Allow
+            Principal:
+              Service: mediaconvert.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${ProcessedBucket.Arn}/transcoded/*"
+          - Sid: AllowMediaConvertListBuckets
+            Effect: Allow
+            Principal:
+              Service: mediaconvert.amazonaws.com
+            Action: s3:ListBucket
+            Resource:
+              - !Sub "${RawVideosBucket.Arn}"
+              - !Sub "${ProcessedBucket.Arn}"
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+            Resource:
+              - !Sub "${RawVideosBucket.Arn}"
+              - !Sub "${RawVideosBucket.Arn}/*"
+              - !Sub "${ProcessedBucket.Arn}"
+              - !Sub "${ProcessedBucket.Arn}/*"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # SNS Topics
+  # ─────────────────────────────────────────────────────────────────────────
+  PipelineTriggerTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-pipeline-trigger"
+      DisplayName: !Sub "${ProjectName} Video Pipeline Trigger"
+
+  PipelineAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-pipeline-alerts"
+      DisplayName: !Sub "${ProjectName} Pipeline Alerts"
+
+  # SNS subscription for email
+  AlertsEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref PipelineAlertsTopic
+      Endpoint: !Ref NotificationEmail
+      Protocol: email
+      FilterPolicy:
+        severity:
+          - high
+          - medium
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # IAM Roles
+  # ─────────────────────────────────────────────────────────────────────────
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-lambda-execution"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "${ProjectName}-lambda-policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: S3ReadWrite
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:HeadObject
+                  - s3:CopyObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "${RawVideosBucket.Arn}"
+                  - !Sub "${RawVideosBucket.Arn}/*"
+                  - !Sub "${ProcessedBucket.Arn}"
+                  - !Sub "${ProcessedBucket.Arn}/*"
+              - Sid: MediaConvert
+                Effect: Allow
+                Action:
+                  - mediaconvert:CreateJob
+                  - mediaconvert:GetJob
+                  - mediaconvert:ListJobs
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref AWS::Region
+              - Sid: Rekognition
+                Effect: Allow
+                Action:
+                  - rekognition:StartLabelDetection
+                  - rekognition:GetLabelDetection
+                  - rekognition:StartContentModeration
+                  - rekognition:GetContentModeration
+                  - rekognition:StartCelebrityRecognition
+                  - rekognition:GetCelebrityRecognition
+                Resource: "*"
+              - Sid: Transcribe
+                Effect: Allow
+                Action:
+                  - transcribe:StartTranscriptionJob
+                  - transcribe:GetTranscriptionJob
+                  - transcribe:ListTranscriptionJobs
+                Resource: "*"
+              - Sid: SNSPublish
+                Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref PipelineTriggerTopic
+              - Sid: SESSend
+                Effect: Allow
+                Action: ses:SendEmail
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    ses:FromAddress: !Ref NotificationEmail
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-*"
+
+  MediaConvertServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-mediaconvert-service"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: mediaconvert.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "${ProjectName}-mediaconvert-policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "${RawVideosBucket.Arn}"
+                  - !Sub "${RawVideosBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "${ProcessedBucket.Arn}/transcoded/*"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Lambda Functions
+  # ─────────────────────────────────────────────────────────────────────────
+  TriggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-trigger"
+      Runtime: python3.11
+      MemorySize: 512
+      Timeout: 300
+      Handler: src/lambda/trigger.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          MEDIACONVERT_ENDPOINT: !Sub "https://mediaconvert.${AWS::Region}.amazonaws.com"
+          MEDIACONVERT_ROLE_ARN: !GetAtt MediaConvertServiceRole.Arn
+          OUTPUT_BUCKET: !Ref ProcessedBucket
+          SNS_TOPIC_ARN: !Ref PipelineTriggerTopic
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import logging
+          from urllib.parse import unquote_plus
+          import boto3
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          MEDIACONVERT_ENDPOINT = os.environ.get("MEDIACONVERT_ENDPOINT")
+          MEDIACONVERT_ROLE_ARN = os.environ.get("MEDIACONVERT_ROLE_ARN")
+          OUTPUT_BUCKET = os.environ.get("OUTPUT_BUCKET")
+          MAX_FILE_SIZE_GB = 8
+          mediaconvert = boto3.client("mediaconvert", endpoint_url=MEDIACONVERT_ENDPOINT)
+          s3 = boto3.client("s3")
+          def handler(event, context):
+              try:
+                  raw_bucket = event["Records"][0]["s3"]["bucket"]["name"]
+                  encoded_key = event["Records"][0]["s3"]["object"]["key"]
+                  file_size_bytes = event["Records"][0]["s3"]["object"].get("size", 0)
+                  filename = unquote_plus(encoded_key)
+              except (KeyError, IndexError) as e:
+                  logger.error({"event": "parse_error", "error": str(e)})
+                  raise ValueError(f"Failed to parse S3 event: {e}")
+              try:
+                  metadata = s3.head_object(Bucket=raw_bucket, Key=filename)
+                  if metadata.get("Metadata", {}).get("x-amz-meta-processed") == "true":
+                      logger.warning({"event": "already_processed", "filename": filename})
+                      return {"statusCode": 200, "body": json.dumps({"message": "Already processed", "filename": filename})}
+              except: pass
+              max_bytes = MAX_FILE_SIZE_GB * 1024 * 1024 * 1024
+              if file_size_bytes > max_bytes:
+                  raise ValueError(f"File exceeds {MAX_FILE_SIZE_GB}GB limit. Rekognition analysis will be skipped.")
+              input_s3_uri = f"s3://{raw_bucket}/{filename}"
+              filename_base = filename.rsplit(".", 1)[0] if "." in filename else filename
+              output_base = f"s3://{OUTPUT_BUCKET}/transcoded/{filename.replace(' ', '_')}/"
+              outputs = [
+                  {"ContainerSettings": {"Container": "MP4"}, "VideoDescription": {"Width": 1920, "Height": 1080, "CodecSettings": {"Codec": "H_264", "H264Settings": {"RateControlMode": "VBR", "Bitrate": 5000000, "MaxBitrate": 5000000, "QualityTuningLevel": "MULTI_PASS_HQ"}}}, "AudioDescriptions": [{"CodecSettings": {"Codec": "AAC", "AacSettings": {"Bitrate": 128000, "SampleRate": 48000, "CodingMode": "CODING_MODE_2_0"}}, "AudioSourceName": "Audio Selector 1"}], "NameModifier": "_hd"},
+                  {"ContainerSettings": {"Container": "MP4"}, "VideoDescription": {"Width": 1280, "Height": 720, "CodecSettings": {"Codec": "H_264", "H264Settings": {"RateControlMode": "VBR", "Bitrate": 2500000, "MaxBitrate": 2500000, "QualityTuningLevel": "MULTI_PASS_HQ"}}}, "AudioDescriptions": [{"CodecSettings": {"Codec": "AAC", "AacSettings": {"Bitrate": 128000, "SampleRate": 48000, "CodingMode": "CODING_MODE_2_0"}}, "AudioSourceName": "Audio Selector 1"}], "NameModifier": "_sd"},
+                  {"ContainerSettings": {"Container": "MP4"}, "VideoDescription": {"Width": 854, "Height": 480, "CodecSettings": {"Codec": "H_264", "H264Settings": {"RateControlMode": "VBR", "Bitrate": 1000000, "MaxBitrate": 1000000, "QualityTuningLevel": "MULTI_PASS_HQ"}}}, "AudioDescriptions": [{"CodecSettings": {"Codec": "AAC", "AacSettings": {"Bitrate": 128000, "SampleRate": 48000, "CodingMode": "CODING_MODE_2_0"}}, "AudioSourceName": "Audio Selector 1"}], "NameModifier": "_mobile"},
+              ]
+              job_body = {"Role": MEDIACONVERT_ROLE_ARN, "Settings": {"Inputs": [{"FileInput": input_s3_uri, "AudioSelectors": {"Audio Selector 1": {"DefaultSelection": "DEFAULT"}}, "VideoSelector": {}}], "OutputGroups": [{"Name": "MP4-Ladder", "OutputGroupSettings": {"Type": "FILE_GROUP_SETTINGS", "FileGroupSettings": {"Destination": output_base}}, "Outputs": outputs}]}, "UserMetadata": {"original_filename": filename, "pipeline_version": "1.0.0"}}
+              response = mediaconvert.create_job(**job_body)
+              job_id = response["Job"]["Id"]
+              logger.info({"event": "mediaconvert_job_created", "job_id": job_id, "filename": filename})
+              return {"statusCode": 200, "body": json.dumps({"message": "MediaConvert job created", "job_id": job_id, "filename": filename})}
+      LogRetentionInDays: !Ref LogRetentionDays
+
+  ProcessFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-process"
+      Runtime: python3.11
+      MemorySize: 1024
+      Timeout: 900
+      Handler: src/lambda/process.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          OUTPUT_BUCKET: !Ref ProcessedBucket
+          NOTIFICATION_EMAIL: !Ref NotificationEmail
+          SNS_TOPIC_ARN: !Ref PipelineTriggerTopic
+          ENABLE_CELEBRITY_RECOGNITION: !Ref EnableCelebrityRecognition
+          MODERATION_CONFIDENCE_THRESHOLD: !Ref ModerationThreshold
+      Code:
+        ZipFile: |
+          import json, os, logging, time
+          from datetime import datetime, timezone
+          import boto3
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          OUTPUT_BUCKET = os.environ.get("OUTPUT_BUCKET")
+          NOTIFICATION_EMAIL = os.environ.get("NOTIFICATION_EMAIL")
+          SNS_TOPIC_ARN = os.environ.get("SNS_TOPIC_ARN")
+          ENABLE_CELEBRITY = os.environ.get("ENABLE_CELEBRITY_RECOGNITION", "false").lower() == "true"
+          MODERATION_THRESHOLD = float(os.environ.get("MODERATION_CONFIDENCE_THRESHOLD", "75.0"))
+          rekognition = boto3.client("rekognition")
+          transcribe = boto3.client("transcribe")
+          s3 = boto3.client("s3")
+          ses = boto3.client("ses")
+          sns = boto3.client("sns")
+          def handler(event, context):
+              start_time = time.time()
+              try:
+                  detail = event.get("detail", {})
+                  job_id = detail.get("jobId")
+                  job_status = detail.get("status")
+                  user_metadata = detail.get("userMetadata", {})
+                  original_filename = user_metadata.get("original_filename", "unknown.mp4")
+                  filename_base = original_filename.rsplit(".", 1)[0] if "." in original_filename else original_filename
+              except Exception as e:
+                  logger.error({"event": "parse_error", "error": str(e)})
+                  raise ValueError(f"Failed to parse event: {e}")
+              if job_status != "COMPLETE":
+                  return {"statusCode": 200, "body": "Job not complete"}
+              transcoded_sd_key = f"transcoded/{original_filename.replace(' ', '_')}/{filename_base}_sd.mp4"
+              transcoded_hd_key = f"transcoded/{original_filename.replace(' ', '_')}/{filename_base}_hd.mp4"
+              try:
+                  s3.head_object(Bucket=OUTPUT_BUCKET, Key=transcoded_sd_key)
+                  rekognition_video_key = transcoded_sd_key
+                  rekognition_resolution = "720p (sd)"
+              except:
+                  rekognition_video_key = transcoded_hd_key
+                  rekognition_resolution = "1080p (hd)"
+              rekognition_video_s3 = {"S3Bucket": OUTPUT_BUCKET, "S3ObjectKey": rekognition_video_key}
+              jobs = {}
+              for job_type, start_fn in [
+                  ("labels", lambda: rekognition.start_label_detection(Video=rekognition_video_s3, MinConfidence=50.0, JobTag=f"{filename_base}-labels")),
+                  ("moderation", lambda: rekognition.start_content_moderation(Video=rekognition_video_s3, MinConfidence=MODERATION_THRESHOLD, JobTag=f"{filename_base}-moderation")),
+              ]:
+                  try:
+                      r = start_fn()
+                      jobs[job_type] = r["JobId"]
+                  except: pass
+              if ENABLE_CELEBRITY:
+                  try:
+                      r = rekognition.start_celebrity_recognition(Video=rekognition_video_s3, JobTag=f"{filename_base}-celebs")
+                      jobs["celebrities"] = r["JobId"]
+                  except: pass
+              poll_timeout = 900
+              poll_start = time.time()
+              results = {}
+              while jobs and time.time() - poll_start < poll_timeout:
+                  for jt, jid in list(jobs.items()):
+                      try:
+                          if jt == "labels": res = rekognition.get_label_detection(JobId=jid)
+                          elif jt == "moderation": res = rekognition.get_content_moderation(JobId=jid)
+                          elif jt == "celebrities": res = rekognition.get_celebrity_recognition(JobId=jid)
+                          if res["JobStatus"] == "SUCCEEDED":
+                              results[jt] = res
+                              del jobs[jt]
+                      except: pass
+                  if jobs: time.sleep(10)
+              transcribe_job_name = f"{filename_base.replace(' ', '_')}-{int(time.time())}"
+              transcribe_vtt_key = f"subtitles/{original_filename.replace(' ', '_')}/{filename_base}.vtt"
+              transcribe_result_key = None
+              try:
+                  transcribe.start_transcription_job(TranscriptionJobName=transcribe_job_name, Media={"MediaFileUri": f"s3://{OUTPUT_BUCKET}/{rekognition_video_key}"}, MediaFormat="mp4", LanguageCode="en-US", OutputBucketName=OUTPUT_BUCKET, OutputKey=transcribe_vtt_key, Settings={"ShowSpeakerLabels": True, "MaxSpeakerLabels": 10})
+                  poll_start = time.time()
+                  while time.time() - poll_start < 600:
+                      try:
+                          st = transcribe.get_transcription_job(TranscriptionJobName=transcribe_job_name)
+                          if st["TranscriptionJob"]["TranscriptionJobStatus"] == "COMPLETED":
+                              transcribe_result_key = transcribe_vtt_key
+                              break
+                          elif st["TranscriptionJob"]["TranscriptionJobStatus"] == "FAILED": break
+                      except: pass
+                      time.sleep(15)
+              except: pass
+              flags = []
+              if "moderation" in results:
+                  for e in results["moderation"].get("ModerationLabels", []):
+                      conf = round(e["ModerationLabel"]["Confidence"], 1)
+                      flags.append({"label": e["ModerationLabel"].get("ParentName","") + "/" + e["ModerationLabel"]["Name"] if e["ModerationLabel"].get("ParentName") else e["ModerationLabel"]["Name"], "confidence": conf, "timestamp_ms": e["Timestamp"], "severity": "HIGH" if conf > 90 else "MEDIUM" if conf > 75 else "LOW"})
+              labels = []
+              if "labels" in results:
+                  for e in results["labels"].get("Labels", []):
+                      labels.append({"name": e["Label"]["Name"], "confidence": round(e["Label"]["Confidence"],1), "timestamp_ms": e["Timestamp"]})
+              celebs = []
+              if "celebrities" in results:
+                  for e in results["celebrities"].get("Celebrities", []):
+                      celebs.append({"name": e["Celebrity"]["Name"], "confidence": round(e["Celebrity"]["Confidence"],1), "timestamp_ms": e["Timestamp"]})
+              report = {"video_name": original_filename, "processed_at": datetime.now(timezone.utc).isoformat(), "pipeline_version": "1.0.0", "transcoding": {"status": "COMPLETED", "rekognition_analysis_resolution": rekognition_resolution, "outputs": [{"label": "hd", "resolution": "1920x1080", "path": transcoded_hd_key}, {"label": "sd", "resolution": "1280x720", "path": transcoded_sd_key}] if transcoded_sd_key else []}, "transcription": {"status": "COMPLETED" if transcribe_result_key else "FAILED", "vtt_path": transcribe_result_key}, "labels": sorted(labels, key=lambda x: x["confidence"], reverse=True)[:50], "moderation": {"status": "COMPLETED", "flags": sorted(flags, key=lambda x: x["confidence"], reverse=True)}, "celebrities": sorted(celebs, key=lambda x: x["confidence"], reverse=True), "cloudwatch_metrics": {"total_processing_time_seconds": round(time.time() - start_time, 1)}}
+              report_key = f"reports/{original_filename.replace(' ', '_')}/{filename_base}-report.json"
+              try: s3.put_object(Bucket=OUTPUT_BUCKET, Key=report_key, Body=json.dumps(report, indent=2), ContentType="application/json", ServerSideEncryption="AES256")
+              except: pass
+              region = os.environ.get("AWS_REGION","us-east-1")
+              def s3_url(key): return f"https://s3.console.aws.amazon.com/s3/object/{OUTPUT_BUCKET}/{key}?region={region}"
+              output_links = "".join([f'<li><a href="{s3_url(o["path"])}"><b>{o["label"].upper()}</b></a></li>' for o in report["transcoding"]["outputs"]])
+              flags_html = ""
+              if flags:
+                  fr = "".join([f'<tr><td>{f["timestamp_ms"]//1000}s</td><td>{f["label"]}</td><td>{f["confidence"]}%</td><td style="color:{"red" if f["severity"]=="HIGH" else "orange"}">{f["severity"]}</td></tr>' for f in flags])
+                  flags_html = f'<h3 style="color:#c0392b;">Moderation Flags ({len(flags)})</h3><table border="1" cellpadding="6" style="border-collapse:collapse;width:100%;"><tr style="background:#f5b7b1;"><th>Time</th><th>Flag</th><th>Conf</th><th>Severity</th></tr>{fr}</table>'
+              html = f'<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;padding:20px;"><div style="background:#1a5276;padding:20px;border-radius:8px 8px 0 0;"><h1 style="color:#fff;margin:0;">Video Processing Complete</h1><p>{original_filename}</p></div><div style="background:#f8f9fa;padding:20px;border:1px solid #ddd;border-top:none;"><h3>Outputs</h3><ul>{output_links}</ul>{flags_html}<p style="font-size:12px;color:#7f8c8d;">Pipeline v1.0.0 | Report: <a href="{s3_url(report_key)}">{report_key}</a></p></div></body></html>'
+              subject = f"[Review] {original_filename}" if flags else f"[Ready] {original_filename}"
+              try:
+                  ses.send_email(Source=NOTIFICATION_EMAIL, Destination={"ToAddresses": [NOTIFICATION_EMAIL]}, Message={"Subject": {"Data": subject, "Charset": "UTF-8"}, "Body": {"Html": {"Data": html, "Charset": "UTF-8"}}})
+                  logger.info({"event": "ses_sent"})
+              except Exception as e:
+                  if "Sandbox" in str(e) or "MessageRejected" in str(e):
+                      try: sns.publish(TopicArn=SNS_TOPIC_ARN, Subject=subject, Message=json.dumps({"video": original_filename, "report_key": report_key}))
+                      except: pass
+              logger.info({"event": "process_complete", "total_time_s": round(time.time()-start_time, 1)})
+              return {"statusCode": 200}
+      ReservedConcurrentExecutions: 5
+      LogRetentionInDays: !Ref LogRetentionDays
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # EventBridge Rule — MediaConvert completion → Process Lambda
+  # ─────────────────────────────────────────────────────────────────────────
+  MediaConvertCompletionRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-mediaconvert-completion"
+      EventPattern:
+        source:
+          - aws.mediaconvert
+        detail-type:
+          - MediaConvert Job State Change
+        detail:
+          status:
+            - COMPLETE
+            - ERROR
+      Targets:
+        - Id: ProcessFunction
+          Arn: !GetAtt ProcessFunction.Arn
+          InputTransformer:
+            InputPathsMap:
+              jobId: $.detail.jobId
+              status: $.detail.status
+              userMetadata: $.detail.userMetadata
+            InputTemplate: '{"jobId": <jobId>, "status": <status>, "userMetadata": <userMetadata>}'
+
+  # Lambda permission for EventBridge to invoke Process function
+  ProcessFunctionEventBridgePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ProcessFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MediaConvertCompletionRule.Arn
+
+  # S3 event notification → Trigger Lambda
+  S3TriggerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt TriggerFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "${RawVideosBucket.Arn}"
+
+  RawBucketNotificationConfiguration:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-raw-videos-${AWS::AccountId}-${AWS::Region}-notification"
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    # Note: Enable S3 event notification via a custom resource or CFN bucket notification APIs
+    # See https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-s3-bucket-notificationconfig.html
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # CloudWatch Alarms
+  # ─────────────────────────────────────────────────────────────────────────
+  PipelineErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-pipeline-error"
+      AlarmDescription: Lambda function error rate above 0 for 1 minute
+      Metrics:
+        - Id: e1
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref TriggerFunction
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+        - Id: e2
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref ProcessFunction
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+        - Id: t1
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Invocations
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref TriggerFunction
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+      Threshold: 1
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: notBreaching
+      Condition: "((e1 > 1 || e2 > 1) && t1 >= 1)"
+      AlarmActions:
+        - !Ref PipelineAlertsTopic
+
+  SESBounceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-ses-bounce"
+      AlarmDescription: SES bounce or complaint rate above 1%
+      MetricName: Bounce
+      Namespace: AWS/SES
+      Statistic: Sum
+      Period: 300
+      Threshold: 1
+      EvaluationPeriods: 1
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref PipelineAlertsTopic
+
+Outputs:
+  RawVideosBucket:
+    Description: S3 bucket for video uploads
+    Value: !Ref RawVideosBucket
+    Export:
+      Name: !Sub "${ProjectName}-raw-bucket"
+
+  ProcessedBucket:
+    Description: S3 bucket for processed outputs
+    Value: !Ref ProcessedBucket
+    Export:
+      Name: !Sub "${ProjectName}-processed-bucket"
+
+  TriggerFunctionArn:
+    Description: ARN of the trigger Lambda
+    Value: !GetAtt TriggerFunction.Arn
+
+  ProcessFunctionArn:
+    Description: ARN of the process Lambda
+    Value: !GetAtt ProcessFunction.Arn
+
+  PipelineTriggerTopicArn:
+    Description: ARN of the pipeline SNS trigger topic
+    Value: !Ref PipelineTriggerTopic
+
+  MediaConvertServiceRoleArn:
+    Description: ARN of the MediaConvert service role
+    Value: !GetAtt MediaConvertServiceRole.Arn
+
+  AWSRegion:
+    Description: Deployment region
+    Value: !Ref AWS::Region
