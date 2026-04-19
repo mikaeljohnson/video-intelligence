@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 480" width="480" height="480">
+  <defs>
+    <!-- Gradient for background -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+    <!-- AWS Orange gradient -->
+    <linearGradient id="orange" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FF9900"/>
+      <stop offset="100%" style="stop-color:#FFB347"/>
+    </linearGradient>
+    <!-- AWS Blue gradient -->
+    <linearGradient id="blue" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#232F3E"/>
+      <stop offset="100%" style="stop-color:#3d5a80"/>
+    </linearGradient>
+    <!-- Glow filter -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="softglow" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="240" cy="240" r="230" fill="url(#bg)" stroke="url(#orange)" stroke-width="3"/>
+
+  <!-- Subtle grid lines (tech feel) -->
+  <g opacity="0.06" stroke="#FF9900" stroke-width="1">
+    <line x1="240" y1="20" x2="240" y2="460"/>
+    <line x1="20" y1="240" x2="460" y2="240"/>
+    <line x1="80" y1="80" x2="400" y2="400"/>
+    <line x1="400" y1="80" x2="80" y2="400"/>
+  </g>
+
+  <!-- S3 Bucket / Cloud shape (left side) -->
+  <g filter="url(#softglow)">
+    <!-- Cloud body -->
+    <path d="M140,200 
+             C125,200 115,190 115,175
+             C115,158 128,145 145,145
+             C145,125 160,112 180,115
+             C195,100 218,105 230,120
+             C248,108 270,118 275,138
+             C292,138 308,152 308,170
+             C308,190 295,205 278,207
+             L278,215 C278,218 275,220 272,220 L145,220
+             C142,220 140,218 140,215 Z"
+          fill="url(#blue)" stroke="#FF9900" stroke-width="2.5"/>
+    <!-- Bucket lid line -->
+    <rect x="140" y="218" width="138" height="8" rx="4" fill="#FF9900"/>
+    <!-- S3 text -->
+    <text x="208" y="206" font-family="Arial, sans-serif" font-size="28" font-weight="bold" 
+          fill="#FF9900" text-anchor="middle">S3</text>
+  </g>
+
+  <!-- Arrow from S3 to Lambda (pipeline flow) -->
+  <g>
+    <path d="M310,185 Q340,185 350,200 Q360,215 380,215" 
+          fill="none" stroke="#FF9900" stroke-width="2.5" 
+          stroke-dasharray="6,4" opacity="0.8"/>
+    <polygon points="376,210 386,215 376,220" fill="#FF9900" opacity="0.8"/>
+  </g>
+
+  <!-- Lambda lightning bolt (center right) -->
+  <g filter="url(#glow)">
+    <polygon points="400,120 370,205 390,205 375,280 420,185 398,185 415,120"
+             fill="url(#orange)" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/>
+    <!-- Lambda λ symbol -->
+    <text x="393" y="205" font-family="Arial, sans-serif" font-size="22" font-weight="bold" 
+          fill="#1a1a2e" text-anchor="middle">λ</text>
+  </g>
+
+  <!-- Video play button overlay (top right corner accent) -->
+  <g transform="translate(340, 60)">
+    <circle cx="30" cy="30" r="28" fill="#232F3E" stroke="url(#orange)" stroke-width="2"/>
+    <polygon points="24,18 24,42 44,30" fill="#FF9900"/>
+  </g>
+
+  <!-- MediaConvert chip (small label) -->
+  <g transform="translate(355, 290)">
+    <rect x="0" y="0" width="110" height="28" rx="14" fill="#232F3E" stroke="#FF9900" stroke-width="1.5"/>
+    <text x="55" y="19" font-family="Arial, sans-serif" font-size="12" font-weight="bold" 
+          fill="#FF9900" text-anchor="middle">MediaConvert</text>
+  </g>
+
+  <!-- Rekognition chip -->
+  <g transform="translate(30, 300)">
+    <rect x="0" y="0" width="110" height="28" rx="14" fill="#232F3E" stroke="#FF9900" stroke-width="1.5"/>
+    <text x="55" y="19" font-family="Arial, sans-serif" font-size="12" font-weight="bold" 
+          fill="#FF9900" text-anchor="middle">Rekognition</text>
+  </g>
+
+  <!-- Transcribe chip -->
+  <g transform="translate(30, 340)">
+    <rect x="0" y="0" width="100" height="28" rx="14" fill="#232F3E" stroke="#FF9900" stroke-width="1.5"/>
+    <text x="50" y="19" font-family="Arial, sans-serif" font-size="12" font-weight="bold" 
+          fill="#FF9900" text-anchor="middle">Transcribe</text>
+  </g>
+
+  <!-- SES chip -->
+  <g transform="translate(355, 340)">
+    <rect x="0" y="0" width="70" height="28" rx="14" fill="#232F3E" stroke="#FF9900" stroke-width="1.5"/>
+    <text x="35" y="19" font-family="Arial, sans-serif" font-size="12" font-weight="bold" 
+          fill="#FF9900" text-anchor="middle">SES 📧</text>
+  </g>
+
+  <!-- Bottom label: MEDIA INTELLIGENCE PIPELINE -->
+  <g transform="translate(240, 425)">
+    <rect x="-150" y="-18" width="300" height="36" rx="18" fill="#232F3E" stroke="url(#orange)" stroke-width="2"/>
+    <text x="0" y="6" font-family="Arial, sans-serif" font-size="15" font-weight="bold" 
+          fill="#FF9900" text-anchor="middle" letter-spacing="2">MEDIA INTELLIGENCE PIPELINE</text>
+  </g>
+
+  <!-- Corner accent lines -->
+  <g stroke="url(#orange)" stroke-width="2" opacity="0.5">
+    <line x1="30" y1="30" x2="30" y2="60"/>
+    <line x1="30" y1="30" x2="60" y2="30"/>
+    <line x1="450" y1="30" x2="450" y2="60"/>
+    <line x1="450" y1="30" x2="420" y2="30"/>
+    <line x1="30" y1="450" x2="30" y2="420"/>
+    <line x1="30" y1="450" x2="60" y2="450"/>
+    <line x1="450" y1="450" x2="450" y2="420"/>
+    <line x1="450" y1="450" x2="420" y2="450"/>
+  </g>
+
+</svg>

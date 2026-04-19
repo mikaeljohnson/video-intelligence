@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+*.pyc
+__pycache__/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Large generated files (store locally, not in repo)
+# logo_convert.js
+bun.lock
+package.json
